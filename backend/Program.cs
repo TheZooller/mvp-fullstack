@@ -1,4 +1,12 @@
+using Microsoft.EntityFrameworkCore;
+using backend.Data;
+
 var builder = WebApplication.CreateBuilder(args);
+
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlite(connectionString));
+
 var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
@@ -6,13 +14,9 @@ app.UseMiddleware<ExceptionHandlingMiddleware>();
 var welcome = app.Configuration["AppSettings:WelcomeMessage"];
 var version = app.Configuration["AppSettings:Version"];
 
-app.Logger.LogInformation("Застосунок запущено. Середовище: {Env}", app.Environment.EnvironmentName);
+app.MapGet("/", () => $"{welcome} (версія {version})");
 
-app.MapGet("/", () =>
-{
-    app.Logger.LogInformation("Опрацювання запиту до головного ендпоінта");
-    return $"{welcome} (версія {version})";
-});
+app.MapGet("/products", async (AppDbContext db) => await db.Products.ToListAsync());
 
 app.MapGet("/boom", () =>
 {
