@@ -10,6 +10,7 @@ public class AppDbContext : DbContext
     }
 
     public DbSet<Product> Products => Set<Product>();
+    public DbSet<User> Users => Set<User>(); // <-- ЭТОТ РЯДОК ОБЯЗАТЕЛЕН
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

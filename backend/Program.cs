@@ -1,5 +1,10 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.OpenApi;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using backend.Data;
 using backend.Models;
 
@@ -9,6 +14,24 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite(connectionString));
 
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
+        };
+    });
+
+builder.Services.AddAuthorization();
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -17,6 +40,31 @@ builder.Services.AddSwaggerGen(options =>
         Title = "MVP Back-End API",
         Version = "v1",
         Description = "Документація REST API навчального MVP-проєкту."
+    });
+
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "Введіть JWT-токен, отриманий з ендпоінта /auth/login."
+    });
+
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            new List<string>()
+        }
     });
 });
 
@@ -31,10 +79,53 @@ app.UseSwaggerUI(options =>
     options.DocumentTitle = "MVP Back-End API";
 });
 
+app.UseAuthentication();
+app.UseAuthorization();
+
 var welcome = app.Configuration["AppSettings:WelcomeMessage"];
 var version = app.Configuration["AppSettings:Version"];
 
 app.MapGet("/", () => $"{welcome} (версія {version})");
+
+app.MapPost("/auth/register", async (RegisterDto dto, AppDbContext db) =>
+{
+    if (await db.Users.AnyAsync(u => u.Email == dto.Email))
+        return Results.Conflict("Користувач з таким email вже існує.");
+
+    var user = new User
+    {
+        Name = dto.Name,
+        Email = dto.Email,
+        PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.Password),
+        Role = "user"
+    };
+
+    db.Users.Add(user);
+    await db.SaveChangesAsync();
+
+    return Results.Created($"/users/{user.Id}", new { user.Id, user.Name, user.Email, user.Role });
+}).WithTags("Auth");
+
+app.MapPost("/auth/login", async (LoginDto dto, AppDbContext db, IConfiguration config) =>
+{
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Email == dto.Email);
+    
+    if (user is null || !BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash))
+        return Results.Unauthorized();
+
+    var token = CreateToken(user, config);
+    return Results.Ok(new { access_token = token, token_type = "Bearer" });
+}).WithTags("Auth");
+
+app.MapGet("/auth/me", (ClaimsPrincipal principal) =>
+    Results.Ok(new
+    {
+        Id = principal.FindFirstValue(ClaimTypes.NameIdentifier),
+        Email = principal.FindFirstValue(ClaimTypes.Email),
+        Role = principal.FindFirstValue(ClaimTypes.Role)
+    }))
+    .RequireAuthorization()
+    .WithTags("Auth");
 
 app.MapGet("/products", async (AppDbContext db) => 
     await db.Products.ToListAsync())
@@ -52,6 +143,7 @@ app.MapPost("/products", async (Product product, AppDbContext db) =>
     await db.SaveChangesAsync();
     return Results.Created($"/products/{product.Id}", product);
 })
+.RequireAuthorization()
 .WithTags("Products");
 
 app.MapPut("/products/{id}", async (int id, Product input, AppDbContext db) =>
@@ -64,6 +156,7 @@ app.MapPut("/products/{id}", async (int id, Product input, AppDbContext db) =>
     await db.SaveChangesAsync();
     return Results.NoContent();
 })
+.RequireAuthorization()
 .WithTags("Products");
 
 app.MapDelete("/products/{id}", async (int id, AppDbContext db) =>
@@ -75,11 +168,32 @@ app.MapDelete("/products/{id}", async (int id, AppDbContext db) =>
     await db.SaveChangesAsync();
     return Results.NoContent();
 })
+.RequireAuthorization()
 .WithTags("Products");
 
-app.MapGet("/boom", () =>
-{
-    throw new Exception("Тестова помилка для перевірки Middleware");
-});
-
 app.Run();
+
+string CreateToken(User user, IConfiguration config)
+{
+    var claims = new[]
+    {
+        new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+        new Claim(ClaimTypes.Email, user.Email),
+        new Claim(ClaimTypes.Role, user.Role)
+    };
+
+    var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(config["Jwt:Key"]!));
+    var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+    var token = new JwtSecurityToken(
+        issuer: config["Jwt:Issuer"],
+        audience: config["Jwt:Audience"],
+        claims: claims,
+        expires: DateTime.UtcNow.AddHours(2),
+        signingCredentials: creds);
+
+    return new JwtSecurityTokenHandler().WriteToken(token);
+}
+
+record RegisterDto(string Name, string Email, string Password);
+record LoginDto(string Email, string Password);
